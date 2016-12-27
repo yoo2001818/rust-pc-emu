@@ -1,0 +1,6 @@
+[package]
+name = "rust-pc-emu"
+version = "0.1.0"
+authors = ["Duknam Yoo <yoo2001818@gmail.com>"]
+
+[dependencies]
