@@ -43,7 +43,7 @@ impl State {
         self.ip = 0;
         self.flags = 0;
     }
-    fn get_register_byte(&self, register: u8) -> &u8 {
+    fn get_register_byte(&self, register: usize) -> &u8 {
         let selector = (register & 3) as usize;
         let high = (register & 4) != 0;
         // This is pretty awkward and unsafe but it's the bestest way to
@@ -56,7 +56,7 @@ impl State {
             &sliced[offset]
         }
     }
-    fn get_register_byte_mut(&mut self, register: u8) -> &mut u8 {
+    fn get_register_byte_mut(&mut self, register: usize) -> &mut u8 {
         let selector = (register & 3) as usize;
         let high = (register & 4) != 0;
         // This is pretty awkward and unsafe but it's the bestest way to fetch the reference
@@ -97,4 +97,63 @@ fn register_byte_test() {
     *(state.get_register_byte_mut(0)) = 0x22;
     assert!(*(state.get_register_byte(0)) == 0x22);
     println!("{}", state);
+}
+
+pub struct CPU {
+    // Allocate 1MB for testing
+    ram: [u8; 1048576],
+    state: State
+}
+
+impl CPU {
+    // As the code is fetched from the RAM itself, it's okay to fetch more than 1 byte
+    // from single function
+    /// Returns the address of current segment and register.
+    fn get_address(&self, segment: usize, register: usize) -> usize {
+        let register_val = self.state.registers[register];
+        let segment_val = self.state.segments[segment];
+        (register_val as usize) + ((segment_val as usize) << 4)
+    }
+    /// Returns the address of instruction pointer.
+    fn get_address_ip(&self) -> usize {
+        let register_val = self.state.ip;
+        let segment_val = self.state.segments[Segment::CS as usize];
+        (register_val as usize) + ((segment_val as usize) << 4)
+    }
+    /// Increment IP and return current instruction
+    fn next_code(&mut self) -> u8 {
+        let output = self.ram[self.get_address_ip()];
+        self.state.ip += 1;
+        output
+    }
+    /// Executes single instruction of the CPU.
+    fn execute(&mut self) {
+        let op = self.next_code();
+        match op {
+            // MOV instruction
+            0x88 ... 0x8B => {
+                // Register / memory to / from register
+            },
+            0xC6 ... 0xC7 => {
+                // Immediate to register / memory
+            },
+            0xB0 ... 0xBF => {
+                // Immediate to register
+            },
+            0xA0 ... 0xA1 => {
+                // Memory to accumulator
+            },
+            0xA2 ... 0xA3 => {
+                // Accumulator to memory
+            },
+            0x8E => {
+                // Register / memory to segment register
+            },
+            0x8C => {
+                // Segment register to register / memory
+            },
+            // Do we raise an interrupt?
+            _ => panic!("Unknown instruction {:08X}", op),
+        }
+    }
 }
