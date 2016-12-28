@@ -1,6 +1,7 @@
 use std::mem;
+use std::fmt;
 
-enum Register {
+pub enum Register {
     AX = 0,
     CX = 1,
     DX = 2,
@@ -11,14 +12,14 @@ enum Register {
     DI = 7
 }
 
-enum Segment {
+pub enum Segment {
     ES = 0,
     CS = 1,
     SS = 2,
     DS = 3
 }
 
-struct State {
+pub struct State {
     registers: [u16; 8],
     segments: [u16; 4],
     // Program counter
@@ -58,8 +59,7 @@ impl State {
     fn get_register_byte_mut(&mut self, register: u8) -> &mut u8 {
         let selector = (register & 3) as usize;
         let high = (register & 4) != 0;
-        // This is pretty awkward and unsafe but it's the bestest way to
-        // fetch the reference
+        // This is pretty awkward and unsafe but it's the bestest way to fetch the reference
         unsafe {
             let sliced = mem::transmute::<&mut u16, &mut [u8; 2]>(&mut self.registers[selector]);
             // little endian high 1 1 -> +1
@@ -68,4 +68,33 @@ impl State {
             &mut sliced[offset]
         }
     }
+}
+
+impl fmt::Display for State {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "ax = {:04X} bx = {:04X} cx = {:04X} dx = {:04X}\n\
+            sp = {:04X} bp = {:04X} si = {:04X} di = {:04X} ip = {:04X}\n\
+            es = {:04X} cs = {:04X} ss = {:04X} ds = {:04X}",
+            self.registers[Register::AX as usize], self.registers[Register::BX as usize],
+            self.registers[Register::CX as usize], self.registers[Register::DX as usize],
+            self.registers[Register::SP as usize], self.registers[Register::BP as usize],
+            self.registers[Register::SI as usize], self.registers[Register::DI as usize],
+            self.ip,
+            self.segments[Segment::ES as usize], self.segments[Segment::CS as usize],
+            self.segments[Segment::SS as usize], self.segments[Segment::DS as usize]
+        )
+    }
+}
+
+#[test]
+fn register_byte_test() {
+    let mut state = State::new();
+    state.registers = [0x501, 0x602, 0x703, 0x804, 0, 0, 0, 0];
+    assert!(*(state.get_register_byte(0)) == 1);
+    assert!(*(state.get_register_byte(4)) == 5);
+    assert!(*(state.get_register_byte(1)) == 2);
+    assert!(*(state.get_register_byte(5)) == 6);
+    *(state.get_register_byte_mut(0)) = 0x22;
+    assert!(*(state.get_register_byte(0)) == 0x22);
+    println!("{}", state);
 }
