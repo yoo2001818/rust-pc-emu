@@ -1,23 +1,19 @@
 use std::mem;
 use std::fmt;
 
-pub enum Register {
-    AX = 0,
-    CX = 1,
-    DX = 2,
-    BX = 3,
-    SP = 4,
-    BP = 5,
-    SI = 6,
-    DI = 7
-}
+const AX: usize = 0;
+const CX: usize = 1;
+const DX: usize = 2;
+const BX: usize = 3;
+const SP: usize = 4;
+const BP: usize = 5;
+const SI: usize = 6;
+const DI: usize = 7;
 
-pub enum Segment {
-    ES = 0,
-    CS = 1,
-    SS = 2,
-    DS = 3
-}
+const ES: usize = 0;
+const CS: usize = 1;
+const SS: usize = 2;
+const DS: usize = 3;
 
 pub struct State {
     registers: [u16; 8],
@@ -43,7 +39,7 @@ impl State {
         self.ip = 0;
         self.flags = 0;
     }
-    fn get_register_byte(&self, register: usize) -> &u8 {
+    fn get_register_byte(&self, register: u8) -> &u8 {
         let selector = (register & 3) as usize;
         let high = (register & 4) != 0;
         // This is pretty awkward and unsafe but it's the bestest way to
@@ -56,7 +52,7 @@ impl State {
             &sliced[offset]
         }
     }
-    fn get_register_byte_mut(&mut self, register: usize) -> &mut u8 {
+    fn get_register_byte_mut(&mut self, register: u8) -> &mut u8 {
         let selector = (register & 3) as usize;
         let high = (register & 4) != 0;
         // This is pretty awkward and unsafe but it's the bestest way to fetch the reference
@@ -75,13 +71,13 @@ impl fmt::Display for State {
         write!(f, "ax = {:04X} bx = {:04X} cx = {:04X} dx = {:04X}\n\
             sp = {:04X} bp = {:04X} si = {:04X} di = {:04X} ip = {:04X}\n\
             es = {:04X} cs = {:04X} ss = {:04X} ds = {:04X}",
-            self.registers[Register::AX as usize], self.registers[Register::BX as usize],
-            self.registers[Register::CX as usize], self.registers[Register::DX as usize],
-            self.registers[Register::SP as usize], self.registers[Register::BP as usize],
-            self.registers[Register::SI as usize], self.registers[Register::DI as usize],
+            self.registers[AX], self.registers[BX],
+            self.registers[CX], self.registers[DX],
+            self.registers[SP], self.registers[BP],
+            self.registers[SI], self.registers[DI],
             self.ip,
-            self.segments[Segment::ES as usize], self.segments[Segment::CS as usize],
-            self.segments[Segment::SS as usize], self.segments[Segment::DS as usize]
+            self.segments[ES], self.segments[CS],
+            self.segments[SS], self.segments[DS]
         )
     }
 }
@@ -109,15 +105,20 @@ impl CPU {
     // As the code is fetched from the RAM itself, it's okay to fetch more than 1 byte
     // from single function
     /// Returns the address of current segment and register.
-    fn get_address(&self, segment: usize, register: usize) -> usize {
+    fn get_address_register(&self, segment: usize, register: usize) -> usize {
         let register_val = self.state.registers[register];
         let segment_val = self.state.segments[segment];
         (register_val as usize) + ((segment_val as usize) << 4)
     }
+    /// Returns the address of current segment and address.
+    fn get_address(&self, segment: usize, address: usize) -> usize {
+        let segment_val = self.state.segments[segment];
+        (address as usize) + ((segment_val as usize) << 4)
+    }
     /// Returns the address of instruction pointer.
     fn get_address_ip(&self) -> usize {
         let register_val = self.state.ip;
-        let segment_val = self.state.segments[Segment::CS as usize];
+        let segment_val = self.state.segments[CS];
         (register_val as usize) + ((segment_val as usize) << 4)
     }
     /// Increment IP and return current instruction
@@ -126,13 +127,167 @@ impl CPU {
         self.state.ip += 1;
         output
     }
+    /// Increment IP and return current instruction word
+    fn next_code_word(&mut self) -> u16 {
+        let output = self.read_word_memory(self.get_address_ip());
+        self.state.ip += 2;
+        output
+    }
+    /// Wraps the address to 0xFFFFF.
+    fn wrap_address(address: usize) -> usize {
+        address % 0xFFFFF
+    }
+    /// Reads the memory as word.
+    fn read_word_memory(&self, address: usize) -> u16 {
+        if address >= 0xFFFFF {
+            // TODO Disable this if A20 line is off?
+            unsafe {
+                u16::from_le(mem::transmute::<[u8; 2], u16>([
+                    self.ram[CPU::wrap_address(address)],
+                    self.ram[CPU::wrap_address(address + 1)]
+                ]))
+            }
+        } else {
+            unsafe {
+                let ptr = (&self.ram[address] as *const u8) as *const u16;
+                u16::from_le(*ptr)
+            }
+        }
+    }
+    /// Writes the memory as word.
+    fn write_word_memory(&mut self, address: usize, value: u16) {
+        let value_le = value.to_le();
+        if address >= 0xFFFFF {
+            // TODO Disable this if A20 line is off?
+            unsafe {
+                let value_arr = mem::transmute::<u16, [u8; 2]>(value_le);
+                self.ram[CPU::wrap_address(address)] = value_arr[0];
+                self.ram[CPU::wrap_address(address + 1)] = value_arr[1];
+            }
+        } else {
+            // This feels so scary
+            unsafe {
+                let ptr = (&mut self.ram[address] as *mut u8) as *mut u16;
+                *ptr = value_le;
+            }
+        }
+    }
+    fn get_address_opcode(&mut self, mode: u8, rm: u8) -> usize {
+        let address = (match rm {
+            0 => self.state.registers[BX] + self.state.registers[SI],
+            1 => self.state.registers[BX] + self.state.registers[DI],
+            2 => self.state.registers[BP] + self.state.registers[SI],
+            3 => self.state.registers[BP] + self.state.registers[DI],
+            4 => self.state.registers[SI],
+            5 => self.state.registers[DI],
+            6 if mode == 0 => self.next_code_word(),
+            6 if mode != 0 => self.state.registers[BP],
+            7 => self.state.registers[BX],
+            _ => panic!("Unknown R/M {}", rm)
+        }) + (match mode {
+            0 => 0,
+            1 => self.next_code() as u16,
+            2 => self.next_code_word(),
+            _ => panic!("Unknown Mode {}", rm)
+        });
+        self.get_address(DS, address as usize)
+    }
+    /// Reads word from R/M and displacement.
+    /// To use this as REG, Provide `3` in MOD.
+    fn read_word(&mut self, mode: u8, rm: u8) -> u16 {
+        if mode == 3 {
+            // Register mode
+            self.state.registers[rm as usize]
+        } else {
+            // Memory mode. Uhhhh...
+            let address = self.get_address_opcode(mode, rm);
+            self.read_word_memory(address)
+        }
+    }
+    /// Writes word from R/M and displacement.
+    /// To use this as REG, Provide `3` in MOD.
+    fn write_word(&mut self, mode: u8, rm: u8, value: u16) {
+        if mode == 3 {
+            // Register mode
+            self.state.registers[rm as usize] = value;
+        } else {
+            // Memory mode. Uhhhh...
+            let address = self.get_address_opcode(mode, rm);
+            self.write_word_memory(address, value);
+        }
+    }
+    /// Returns reference of byte from R/M and displacement.
+    /// To use this as REG, Provide `3` in MOD.
+    fn get_byte(&mut self, mode: u8, rm: u8) -> &u8 {
+        if mode == 3 {
+            // Register mode
+            self.state.get_register_byte(rm)
+        } else {
+            // Memory mode. Uhhhh...
+            let address = self.get_address_opcode(mode, rm);
+            &self.ram[address]
+        }
+    }
+    /// Returns reference of byte from R/M and displacement.
+    /// To use this as REG, Provide `3` in MOD.
+    fn get_byte_mut(&mut self, mode: u8, rm: u8) -> &mut u8 {
+        if mode == 3 {
+            // Register mode
+            self.state.get_register_byte_mut(rm)
+        } else {
+            // Memory mode. Uhhhh...
+            let address = self.get_address_opcode(mode, rm);
+            &mut self.ram[address]
+        }
+    }
     /// Executes single instruction of the CPU.
     fn execute(&mut self) {
-        let op = self.next_code();
+        let mut op = self.next_code();
         match op {
             // MOV instruction
             0x88 ... 0x8B => {
                 // Register / memory to / from register
+                let dw = op & 3;
+                op = self.next_code();
+                let mode = op >> 6;
+                let reg = (op >> 3) & 7;
+                let rm = op & 7;
+                // There are 8 conditions we need to take care of:
+                // MOD = 11, D = 0, W = 0: Byte, Register, REG -> R/M
+                // MOD = 11, D = 0, W = 1: Word, Register, REG -> R/M
+                // MOD = 11, D = 1, W = 0: Byte, Register, R/M -> REG
+                // MOD = 11, D = 1, W = 1: Word, Register, R/M -> REG
+                // MOD = ETC, D = 0, W = 0: Byte, Memory, REG -> R/M
+                // MOD = ETC, D = 0, W = 1: Word, Memory, REG -> R/M
+                // MOD = ETC, D = 1, W = 0: Byte, Memory, R/M -> REG
+                // MOD = ETC, D = 1, W = 1: Word, Memory, R/M -> REG
+                match dw {
+                    0 => {
+                        // Byte, REG -> R/M
+                        // We need to dereference pointer before calling get_byte_mut
+                        let value = *self.get_byte(3, reg);
+                        let to = self.get_byte_mut(mode, rm);
+                        *to = value;
+                    },
+                    1 => {
+                        // Word, REG -> R/M
+                        let from_val = self.read_word(3, reg);
+                        self.write_word(mode, rm, from_val);
+                    },
+                    2 => {
+                        // Byte, R/M -> REG
+                        // We need to dereference pointer before calling get_byte_mut
+                        let value = *self.get_byte(3, reg);
+                        let to = self.get_byte_mut(mode, rm);
+                        *to = value;
+                    },
+                    3 => {
+                        // Word, R/M -> REG
+                        let from_val = self.read_word(mode, rm);
+                        self.write_word(3, reg, from_val);
+                    },
+                    _ => panic!("Unknown D/W field {}", dw)
+                }
             },
             0xC6 ... 0xC7 => {
                 // Immediate to register / memory
@@ -153,7 +308,7 @@ impl CPU {
                 // Segment register to register / memory
             },
             // Do we raise an interrupt?
-            _ => panic!("Unknown instruction {:08X}", op),
+            _ => panic!("Unknown instruction {:02X}", op),
         }
     }
 }
