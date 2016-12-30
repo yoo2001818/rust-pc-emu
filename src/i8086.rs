@@ -254,6 +254,84 @@ impl CPU {
             &mut self.ram[address]
         }
     }
+    fn reg_to_rm_word<F>(&mut self, d: bool, operator: F) where F: Fn(&mut CPU, u16, u16) -> u16 {
+        let op = self.next_code();
+        let mode = op >> 6;
+        let reg = (op >> 3) & 7;
+        let rm = op & 7;
+        let offset = self.fetch_offset(mode, rm);
+        if d {
+            let self_val = self.read_word(3, reg, 0);
+            let other_val = self.read_word(mode, rm, offset);
+            let returned = operator(self, self_val, other_val);
+            self.write_word(3, reg, 0, returned);
+        } else {
+            let self_val = self.read_word(mode, rm, offset);
+            let other_val = self.read_word(3, reg, 0);
+            let returned = operator(self, self_val, other_val);
+            self.write_word(mode, rm, offset, returned);
+        }
+    }
+    fn reg_to_rm_byte<F>(&mut self, d: bool, operator: F) where F: Fn(&mut CPU, u8, u8) -> u8 {
+        let op = self.next_code();
+        let mode = op >> 6;
+        let reg = (op >> 3) & 7;
+        let rm = op & 7;
+        let offset = self.fetch_offset(mode, rm);
+        if d {
+            let self_val = *self.get_byte(3, reg, 0);
+            let other_val = *self.get_byte(mode, rm, offset);
+            let returned = operator(self, self_val, other_val);
+            *self.get_byte_mut(3, reg, 0) = returned;
+        } else {
+            let self_val = *self.get_byte(mode, rm, offset);
+            let other_val = *self.get_byte(3, reg, 0);
+            let returned = operator(self, self_val, other_val);
+            *self.get_byte_mut(mode, rm, offset) = returned;
+        }
+    }
+    fn reg_to_rm<B, W>(&mut self, dw: u8, byte_op: B, word_op: W)
+        where B: Fn(&mut CPU, u8, u8) -> u8, W: Fn(&mut CPU, u16, u16) -> u16 {
+
+        let d = (dw & 2) != 0;
+        let w = (dw & 1) != 0;
+        if w {
+            self.reg_to_rm_word(d, word_op)
+        } else {
+            self.reg_to_rm_byte(d, byte_op)
+        }
+    }
+    fn imm_to_rm_word<F>(&mut self, operator: F) where F: Fn(&mut CPU, u16, u16, u8) -> u16 {
+        let op = self.next_code();
+        let mode = op >> 6;
+        let center = (op >> 3) & 7;
+        let rm = op & 7;
+        let offset = self.fetch_offset(mode, rm);
+        let self_val = self.read_word(mode, rm, offset);
+        let other_val = self.next_code_word();
+        let returned = operator(self, self_val, other_val, center);
+        self.write_word(mode, rm, offset, returned);
+    }
+    fn imm_to_rm_byte<F>(&mut self, operator: F) where F: Fn(&mut CPU, u8, u8, u8) -> u8 {
+        let op = self.next_code();
+        let mode = op >> 6;
+        let center = (op >> 3) & 7;
+        let rm = op & 7;
+        let offset = self.fetch_offset(mode, rm);
+        let self_val = *self.get_byte(mode, rm, offset);
+        let other_val = self.next_code();
+        let returned = operator(self, self_val, other_val, center);
+        *self.get_byte_mut(mode, rm, offset) = returned;
+    }
+    fn imm_to_rm<B, W>(&mut self, w: bool, byte_op: B, word_op: W)
+        where B: Fn(&mut CPU, u8, u8, u8) -> u8, W: Fn(&mut CPU, u16, u16, u8) -> u16 {
+
+        if w {
+            self.imm_to_rm_word(word_op)
+        } else {
+            self.imm_to_rm_byte(byte_op)
+        }
+    }
     /// Executes single instruction of the CPU.
     fn execute(&mut self) {
         let mut op = self.next_code();
@@ -262,64 +340,12 @@ impl CPU {
             0x88 ... 0x8B => {
                 // Register / memory to / from register
                 let dw = op & 3;
-                op = self.next_code();
-                let mode = op >> 6;
-                let reg = (op >> 3) & 7;
-                let rm = op & 7;
-                let offset = self.fetch_offset(mode, rm);
-                // There are 8 conditions we need to take care of:
-                // MOD = 11, D = 0, W = 0: Byte, Register, REG -> R/M
-                // MOD = 11, D = 0, W = 1: Word, Register, REG -> R/M
-                // MOD = 11, D = 1, W = 0: Byte, Register, R/M -> REG
-                // MOD = 11, D = 1, W = 1: Word, Register, R/M -> REG
-                // MOD = ETC, D = 0, W = 0: Byte, Memory, REG -> R/M
-                // MOD = ETC, D = 0, W = 1: Word, Memory, REG -> R/M
-                // MOD = ETC, D = 1, W = 0: Byte, Memory, R/M -> REG
-                // MOD = ETC, D = 1, W = 1: Word, Memory, R/M -> REG
-                match dw {
-                    0 => {
-                        // Byte, REG -> R/M
-                        // We need to dereference pointer before calling get_byte_mut
-                        let value = *self.get_byte(3, reg, 0);
-                        let to = self.get_byte_mut(mode, rm, offset);
-                        *to = value;
-                    },
-                    1 => {
-                        // Word, REG -> R/M
-                        let from_val = self.read_word(3, reg, 0);
-                        self.write_word(mode, rm, offset, from_val);
-                    },
-                    2 => {
-                        // Byte, R/M -> REG
-                        // We need to dereference pointer before calling get_byte_mut
-                        let value = *self.get_byte(3, reg, 0);
-                        let to = self.get_byte_mut(mode, rm, offset);
-                        *to = value;
-                    },
-                    3 => {
-                        // Word, R/M -> REG
-                        let from_val = self.read_word(mode, rm, offset);
-                        self.write_word(3, reg, 0, from_val);
-                    },
-                    _ => panic!("Unknown D/W field {}", dw)
-                }
+                self.reg_to_rm(dw, |cpu, x, y| y, |cpu, x, y| y);
             },
             0xC6 ... 0xC7 => {
                 // Immediate to register / memory
-                let w = op & 1;
-                op = self.next_code();
-                let mode = op >> 6;
-                let rm = op & 7;
-                let offset = self.fetch_offset(mode, rm);
-                if w & 1 == 0 {
-                    // Byte
-                    let data = self.next_code();
-                    *self.get_byte_mut(mode, rm, offset) = data;
-                } else {
-                    // Word
-                    let data = self.next_code_word();
-                    self.write_word(mode, rm, offset, data);
-                }
+                let w = (op & 1) != 0;
+                self.imm_to_rm(w, |cpu, x, y, c| y, |cpu, x, y, c| y);
             },
             0xB0 ... 0xBF => {
                 // Immediate to register
