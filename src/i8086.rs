@@ -301,27 +301,46 @@ impl CPU {
             self.reg_to_rm_byte(d, byte_op)
         }
     }
-    fn imm_to_rm_word<F>(&mut self, operator: F) where F: Fn(&mut CPU, u16, u16, u8) -> u16 {
+    fn rm_word<F>(&mut self, operator: F) where F: Fn(&mut CPU, u16, u8) -> u16 {
         let op = self.next_code();
         let mode = op >> 6;
         let center = (op >> 3) & 7;
         let rm = op & 7;
         let offset = self.fetch_offset(mode, rm);
         let self_val = self.read_word(mode, rm, offset);
-        let other_val = self.next_code_word();
-        let returned = operator(self, self_val, other_val, center);
+        let returned = operator(self, self_val, center);
         self.write_word(mode, rm, offset, returned);
     }
-    fn imm_to_rm_byte<F>(&mut self, operator: F) where F: Fn(&mut CPU, u8, u8, u8) -> u8 {
+    fn rm_byte<F>(&mut self, operator: F) where F: Fn(&mut CPU, u8, u8) -> u8 {
         let op = self.next_code();
         let mode = op >> 6;
         let center = (op >> 3) & 7;
         let rm = op & 7;
         let offset = self.fetch_offset(mode, rm);
         let self_val = *self.get_byte(mode, rm, offset);
-        let other_val = self.next_code();
-        let returned = operator(self, self_val, other_val, center);
+        let returned = operator(self, self_val, center);
         *self.get_byte_mut(mode, rm, offset) = returned;
+    }
+    fn rm<B, W>(&mut self, w: bool, byte_op: B, word_op: W)
+        where B: Fn(&mut CPU, u8, u8) -> u8, W: Fn(&mut CPU, u16, u8) -> u16 {
+
+        if w {
+            self.rm_word(word_op)
+        } else {
+            self.rm_byte(byte_op)
+        }
+    }
+    fn imm_to_rm_word<F>(&mut self, operator: F) where F: Fn(&mut CPU, u16, u16, u8) -> u16 {
+        self.rm_word(|cpu, x, center| {
+            let other_val = cpu.next_code_word();
+            operator(cpu, x, other_val, center)
+        })
+    }
+    fn imm_to_rm_byte<F>(&mut self, operator: F) where F: Fn(&mut CPU, u8, u8, u8) -> u8 {
+        self.rm_byte(|cpu, x, center| {
+            let other_val = cpu.next_code();
+            operator(cpu, x, other_val, center)
+        })
     }
     fn imm_to_rm<B, W>(&mut self, w: bool, byte_op: B, word_op: W)
         where B: Fn(&mut CPU, u8, u8, u8) -> u8, W: Fn(&mut CPU, u16, u16, u8) -> u16 {
@@ -407,6 +426,56 @@ impl CPU {
                     let value = self.state.segments[sr as usize];
                     self.write_word(mode, rm, offset, value);
                 }
+            },
+            // PUSH instruction
+            0xFF => {
+                // Store R/M
+                self.rm_word(|cpu, val, center| {
+                    assert!(center == 6);
+                    cpu.state.registers[SP] -= 2;
+                    let address = cpu.get_address_register(SS, SP);
+                    cpu.write_word_memory(address, val);
+                    val
+                });
+            },
+            0x50 ... 0x57 => {
+                // Store register
+                let val = self.state.registers[(op & 0x7) as usize];
+                self.state.registers[SP] -= 2;
+                let address = self.get_address_register(SS, SP);
+                self.write_word_memory(address, val);
+            },
+            0x06 | 0x0E | 0x16 | 0x1E => {
+                // Store segment register
+                let val = self.state.segments[((op >> 3) & 0x3) as usize];
+                self.state.registers[SP] -= 2;
+                let address = self.get_address_register(SS, SP);
+                self.write_word_memory(address, val);
+            },
+            // POP instruction
+            0x8F => {
+                // Pop R/M
+                self.rm_word(|cpu, val, center| {
+                    assert!(center == 0);
+                    let address = cpu.get_address_register(SS, SP);
+                    let result = cpu.read_word_memory(address);
+                    cpu.state.registers[SP] += 2;
+                    result
+                });
+            },
+            0x58 ... 0x5F => {
+                // Pop register
+                let address = self.get_address_register(SS, SP);
+                let result = self.read_word_memory(address);
+                self.state.registers[(op & 0x7) as usize] = result;
+                self.state.registers[SP] += 2;
+            },
+            0x07 | 0x0F | 0x17 | 0x1F => {
+                // Pop segment register
+                let address = self.get_address_register(SS, SP);
+                let result = self.read_word_memory(address);
+                self.state.segments[((op >> 3) & 0x3) as usize] = result;
+                self.state.registers[SP] += 2;
             },
             // Do we raise an interrupt?
             _ => panic!("Unknown instruction {:02X}", op),
