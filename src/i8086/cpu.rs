@@ -1,113 +1,12 @@
 use std::mem;
 use std::fmt;
-
-const AX: usize = 0;
-const CX: usize = 1;
-const DX: usize = 2;
-const BX: usize = 3;
-const SP: usize = 4;
-const BP: usize = 5;
-const SI: usize = 6;
-const DI: usize = 7;
-
-const AL: u8 = 0;
-const CL: u8 = 1;
-const DL: u8 = 2;
-const BL: u8 = 3;
-const AH: u8 = 4;
-const CH: u8 = 5;
-const DH: u8 = 6;
-const BH: u8 = 7;
-
-const ES: usize = 0;
-const CS: usize = 1;
-const SS: usize = 2;
-const DS: usize = 3;
-
-pub struct State {
-    registers: [u16; 8],
-    segments: [u16; 4],
-    // Program counter
-    ip: u16,
-    // Status register
-    flags: u16
-}
-
-impl State {
-    fn new() -> State {
-        State {
-            registers: [0; 8],
-            segments: [0, 0xFFFF, 0, 0],
-            ip: 0,
-            flags: 0
-        }
-    }
-    fn reset(&mut self) {
-        self.registers = [0; 8];
-        self.segments = [0, 0xFFFF, 0, 0];
-        self.ip = 0;
-        self.flags = 0;
-    }
-    fn get_register_byte(&self, register: u8) -> &u8 {
-        let selector = (register & 3) as usize;
-        let high = (register & 4) != 0;
-        // This is pretty awkward and unsafe but it's the bestest way to
-        // fetch the reference
-        unsafe {
-            let sliced = mem::transmute::<&u16, &[u8; 2]>(&self.registers[selector]);
-            // little endian high 1 1 -> +1
-            // big endian low 0 0 -> +1
-            let offset = if high == cfg!(target_endian = "little") { 1 } else { 0 };
-            &sliced[offset]
-        }
-    }
-    fn get_register_byte_mut(&mut self, register: u8) -> &mut u8 {
-        let selector = (register & 3) as usize;
-        let high = (register & 4) != 0;
-        // This is pretty awkward and unsafe but it's the bestest way to fetch the reference
-        unsafe {
-            let sliced = mem::transmute::<&mut u16, &mut [u8; 2]>(&mut self.registers[selector]);
-            // little endian high 1 1 -> +1
-            // big endian low 0 0 -> +1
-            let offset = if high == cfg!(target_endian = "little") { 1 } else { 0 };
-            &mut sliced[offset]
-        }
-    }
-}
-
-impl fmt::Display for State {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "ax = {:04X} bx = {:04X} cx = {:04X} dx = {:04X}\n\
-            sp = {:04X} bp = {:04X} si = {:04X} di = {:04X} ip = {:04X}\n\
-            es = {:04X} cs = {:04X} ss = {:04X} ds = {:04X}",
-            self.registers[AX], self.registers[BX],
-            self.registers[CX], self.registers[DX],
-            self.registers[SP], self.registers[BP],
-            self.registers[SI], self.registers[DI],
-            self.ip,
-            self.segments[ES], self.segments[CS],
-            self.segments[SS], self.segments[DS]
-        )
-    }
-}
-
-#[test]
-fn register_byte_test() {
-    let mut state = State::new();
-    state.registers = [0x501, 0x602, 0x703, 0x804, 0, 0, 0, 0];
-    assert!(*(state.get_register_byte(0)) == 1);
-    assert!(*(state.get_register_byte(4)) == 5);
-    assert!(*(state.get_register_byte(1)) == 2);
-    assert!(*(state.get_register_byte(5)) == 6);
-    *(state.get_register_byte_mut(0)) = 0x22;
-    assert!(*(state.get_register_byte(0)) == 0x22);
-    println!("{}", state);
-}
+use i8086::state::State;
+use i8086::constants;
 
 pub struct CPU {
     // Allocate 1MB for testing
-    ram: [u8; 1048576],
-    state: State
+    pub ram: [u8; 1048576],
+    pub state: State
 }
 
 impl CPU {
@@ -127,7 +26,7 @@ impl CPU {
     /// Returns the address of instruction pointer.
     fn get_address_ip(&self) -> usize {
         let register_val = self.state.ip;
-        let segment_val = self.state.segments[CS];
+        let segment_val = self.state.segments[constants::CS];
         (register_val as usize) + ((segment_val as usize) << 4)
     }
     /// Increment IP and return current instruction
@@ -193,18 +92,18 @@ impl CPU {
     }
     fn get_address_opcode(&self, mode: u8, rm: u8, offset: usize) -> usize {
         let address = (match rm {
-            0 => self.state.registers[BX] + self.state.registers[SI],
-            1 => self.state.registers[BX] + self.state.registers[DI],
-            2 => self.state.registers[BP] + self.state.registers[SI],
-            3 => self.state.registers[BP] + self.state.registers[DI],
-            4 => self.state.registers[SI],
-            5 => self.state.registers[DI],
+            0 => self.state.registers[constants::BX] + self.state.registers[constants::SI],
+            1 => self.state.registers[constants::BX] + self.state.registers[constants::DI],
+            2 => self.state.registers[constants::BP] + self.state.registers[constants::SI],
+            3 => self.state.registers[constants::BP] + self.state.registers[constants::DI],
+            4 => self.state.registers[constants::SI],
+            5 => self.state.registers[constants::DI],
             6 if mode == 0 => 0,
-            6 if mode != 0 => self.state.registers[BP],
-            7 => self.state.registers[BX],
+            6 if mode != 0 => self.state.registers[constants::BP],
+            7 => self.state.registers[constants::BX],
             _ => panic!("Unknown R/M {}", rm)
         }) as usize + offset;
-        self.get_address(DS, address)
+        self.get_address(constants::DS, address)
     }
     /// Reads word from R/M and displacement.
     /// To use this as REG, Provide `3` in MOD.
@@ -385,14 +284,14 @@ impl CPU {
                 let w = (op >> 3) & 1;
                 let addr = {
                     let addr_low = self.next_code_word();
-                    self.get_address(DS, addr_low as usize)
+                    self.get_address(constants::DS, addr_low as usize)
                 };
                 if w & 1 == 0 {
                     // Byte
-                    *self.state.get_register_byte_mut(AL) = self.ram[addr];
+                    *self.state.get_register_byte_mut(constants::AL) = self.ram[addr];
                 } else {
                     // Word
-                    self.state.registers[AX] = self.read_word_memory(addr);
+                    self.state.registers[constants::AX] = self.read_word_memory(addr);
                 }
             },
             0xA2 ... 0xA3 => {
@@ -400,14 +299,14 @@ impl CPU {
                 let w = (op >> 3) & 1;
                 let addr = {
                     let addr_low = self.next_code_word();
-                    self.get_address(DS, addr_low as usize)
+                    self.get_address(constants::DS, addr_low as usize)
                 };
                 if w & 1 == 0 {
                     // Byte
-                    self.ram[addr] = *self.state.get_register_byte(AL);
+                    self.ram[addr] = *self.state.get_register_byte(constants::AL);
                 } else {
                     // Word
-                    let value = self.state.registers[AX];
+                    let value = self.state.registers[constants::AX];
                     self.write_word_memory(addr, value);
                 }
             },
@@ -432,8 +331,8 @@ impl CPU {
                 // Store R/M
                 self.rm_word(|cpu, val, center| {
                     assert!(center == 6);
-                    cpu.state.registers[SP] -= 2;
-                    let address = cpu.get_address_register(SS, SP);
+                    cpu.state.registers[constants::SP] -= 2;
+                    let address = cpu.get_address_register(constants::SS, constants::SP);
                     cpu.write_word_memory(address, val);
                     val
                 });
@@ -441,15 +340,15 @@ impl CPU {
             0x50 ... 0x57 => {
                 // Store register
                 let val = self.state.registers[(op & 0x7) as usize];
-                self.state.registers[SP] -= 2;
-                let address = self.get_address_register(SS, SP);
+                self.state.registers[constants::SP] -= 2;
+                let address = self.get_address_register(constants::SS, constants::SP);
                 self.write_word_memory(address, val);
             },
             0x06 | 0x0E | 0x16 | 0x1E => {
                 // Store segment register
                 let val = self.state.segments[((op >> 3) & 0x3) as usize];
-                self.state.registers[SP] -= 2;
-                let address = self.get_address_register(SS, SP);
+                self.state.registers[constants::SP] -= 2;
+                let address = self.get_address_register(constants::SS, constants::SP);
                 self.write_word_memory(address, val);
             },
             // POP instruction
@@ -457,25 +356,25 @@ impl CPU {
                 // Pop R/M
                 self.rm_word(|cpu, val, center| {
                     assert!(center == 0);
-                    let address = cpu.get_address_register(SS, SP);
+                    let address = cpu.get_address_register(constants::SS, constants::SP);
                     let result = cpu.read_word_memory(address);
-                    cpu.state.registers[SP] += 2;
+                    cpu.state.registers[constants::SP] += 2;
                     result
                 });
             },
             0x58 ... 0x5F => {
                 // Pop register
-                let address = self.get_address_register(SS, SP);
+                let address = self.get_address_register(constants::SS, constants::SP);
                 let result = self.read_word_memory(address);
                 self.state.registers[(op & 0x7) as usize] = result;
-                self.state.registers[SP] += 2;
+                self.state.registers[constants::SP] += 2;
             },
             0x07 | 0x0F | 0x17 | 0x1F => {
                 // Pop segment register
-                let address = self.get_address_register(SS, SP);
+                let address = self.get_address_register(constants::SS, constants::SP);
                 let result = self.read_word_memory(address);
                 self.state.segments[((op >> 3) & 0x3) as usize] = result;
-                self.state.registers[SP] += 2;
+                self.state.registers[constants::SP] += 2;
             },
             // Do we raise an interrupt?
             _ => panic!("Unknown instruction {:02X}", op),
