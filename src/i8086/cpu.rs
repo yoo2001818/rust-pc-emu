@@ -1,5 +1,6 @@
 use std::mem;
 use std::fmt;
+use i8086::address::{RegisterOrMemory, parse_reg, parse_rm};
 use i8086::state::State;
 use i8086::constants;
 
@@ -30,13 +31,13 @@ impl CPU {
         (register_val as usize) + ((segment_val as usize) << 4)
     }
     /// Increment IP and return current instruction
-    fn next_code(&mut self) -> u8 {
+    pub fn next_code(&mut self) -> u8 {
         let output = self.ram[self.get_address_ip()];
         self.state.ip += 1;
         output
     }
     /// Increment IP and return current instruction word
-    fn next_code_word(&mut self) -> u16 {
+    pub fn next_code_word(&mut self) -> u16 {
         let output = self.read_word_memory(self.get_address_ip());
         self.state.ip += 2;
         output
@@ -80,113 +81,71 @@ impl CPU {
             }
         }
     }
-    fn fetch_offset(&mut self, mode: u8, rm: u8) -> usize {
-        match mode {
-            0 if rm == 6 => self.next_code_word() as usize,
-            0 if rm != 6 => 0,
-            1 => self.next_code() as usize,
-            2 => self.next_code_word() as usize,
-            3 => 0,
-            _ => panic!("Unknown Mode {}", mode)
+    /// Reads word from RegisterOrMemory.
+    fn read_word(&self, address: &RegisterOrMemory) -> u16 {
+        match address {
+            &RegisterOrMemory::Register(addr) => self.state.registers[addr as usize],
+            &RegisterOrMemory::Memory(addr) => {
+                self.read_word_memory(self.get_address(constants::DS, addr as usize))
+            },
         }
     }
-    fn get_address_opcode(&self, mode: u8, rm: u8, offset: usize) -> usize {
-        let address = (match rm {
-            0 => self.state.registers[constants::BX] + self.state.registers[constants::SI],
-            1 => self.state.registers[constants::BX] + self.state.registers[constants::DI],
-            2 => self.state.registers[constants::BP] + self.state.registers[constants::SI],
-            3 => self.state.registers[constants::BP] + self.state.registers[constants::DI],
-            4 => self.state.registers[constants::SI],
-            5 => self.state.registers[constants::DI],
-            6 if mode == 0 => 0,
-            6 if mode != 0 => self.state.registers[constants::BP],
-            7 => self.state.registers[constants::BX],
-            _ => panic!("Unknown R/M {}", rm)
-        }) as usize + offset;
-        self.get_address(constants::DS, address)
-    }
-    /// Reads word from R/M and displacement.
-    /// To use this as REG, Provide `3` in MOD.
-    fn read_word(&self, mode: u8, rm: u8, offset: usize) -> u16 {
-        if mode == 3 {
-            // Register mode
-            self.state.registers[rm as usize]
-        } else {
-            // Memory mode. Uhhhh...
-            let address = self.get_address_opcode(mode, rm, offset);
-            self.read_word_memory(address)
+    /// Writes word from RegisterOrMemory.
+    fn write_word(&mut self, address: &RegisterOrMemory, value: u16) {
+        match address {
+            &RegisterOrMemory::Register(addr) => self.state.registers[addr as usize] = value,
+            &RegisterOrMemory::Memory(addr) => {
+                let address = self.get_address(constants::DS, addr as usize);
+                self.write_word_memory(address, value)
+            },
         }
     }
-    /// Writes word from R/M and displacement.
-    /// To use this as REG, Provide `3` in MOD.
-    fn write_word(&mut self, mode: u8, rm: u8, offset: usize, value: u16) {
-        if mode == 3 {
-            // Register mode
-            self.state.registers[rm as usize] = value;
-        } else {
-            // Memory mode. Uhhhh...
-            let address = self.get_address_opcode(mode, rm, offset);
-            self.write_word_memory(address, value);
+    /// Returns reference of RegisterOrMemory.
+    fn get_byte(&self, address: &RegisterOrMemory) -> &u8 {
+        match address {
+            &RegisterOrMemory::Register(addr) => self.state.get_register_byte(addr),
+            &RegisterOrMemory::Memory(addr) => {
+                &self.ram[self.get_address(constants::DS, addr as usize)]
+            },
         }
     }
-    /// Returns reference of byte from R/M and displacement.
-    /// To use this as REG, Provide `3` in MOD.
-    fn get_byte(&self, mode: u8, rm: u8, offset: usize) -> &u8 {
-        if mode == 3 {
-            // Register mode
-            self.state.get_register_byte(rm)
-        } else {
-            // Memory mode. Uhhhh...
-            let address = self.get_address_opcode(mode, rm, offset);
-            &self.ram[address]
-        }
-    }
-    /// Returns reference of byte from R/M and displacement.
-    /// To use this as REG, Provide `3` in MOD.
-    fn get_byte_mut(&mut self, mode: u8, rm: u8, offset: usize) -> &mut u8 {
-        if mode == 3 {
-            // Register mode
-            self.state.get_register_byte_mut(rm)
-        } else {
-            // Memory mode. Uhhhh...
-            let address = self.get_address_opcode(mode, rm, offset);
-            &mut self.ram[address]
+    /// Returns reference of RegisterOrMemory.
+    fn get_byte_mut(&mut self, address: &RegisterOrMemory) -> &mut u8 {
+        match address {
+            &RegisterOrMemory::Register(addr) => self.state.get_register_byte_mut(addr),
+            &RegisterOrMemory::Memory(addr) => {
+                &mut self.ram[self.get_address(constants::DS, addr as usize)]
+            },
         }
     }
     fn reg_to_rm_word<F>(&mut self, d: bool, operator: F) where F: Fn(&mut CPU, u16, u16) -> u16 {
-        let op = self.next_code();
-        let mode = op >> 6;
-        let reg = (op >> 3) & 7;
-        let rm = op & 7;
-        let offset = self.fetch_offset(mode, rm);
+        let (rm_addr, reg) = parse_rm(self);
+        let reg_addr = parse_reg(reg);
         if d {
-            let self_val = self.read_word(3, reg, 0);
-            let other_val = self.read_word(mode, rm, offset);
+            let self_val = self.read_word(&reg_addr);
+            let other_val = self.read_word(&rm_addr);
             let returned = operator(self, self_val, other_val);
-            self.write_word(3, reg, 0, returned);
+            self.write_word(&reg_addr, returned);
         } else {
-            let self_val = self.read_word(mode, rm, offset);
-            let other_val = self.read_word(3, reg, 0);
+            let self_val = self.read_word(&rm_addr);
+            let other_val = self.read_word(&reg_addr);
             let returned = operator(self, self_val, other_val);
-            self.write_word(mode, rm, offset, returned);
+            self.write_word(&rm_addr, returned);
         }
     }
     fn reg_to_rm_byte<F>(&mut self, d: bool, operator: F) where F: Fn(&mut CPU, u8, u8) -> u8 {
-        let op = self.next_code();
-        let mode = op >> 6;
-        let reg = (op >> 3) & 7;
-        let rm = op & 7;
-        let offset = self.fetch_offset(mode, rm);
+        let (rm_addr, reg) = parse_rm(self);
+        let reg_addr = parse_reg(reg);
         if d {
-            let self_val = *self.get_byte(3, reg, 0);
-            let other_val = *self.get_byte(mode, rm, offset);
+            let self_val = *self.get_byte(&reg_addr);
+            let other_val = *self.get_byte(&rm_addr);
             let returned = operator(self, self_val, other_val);
-            *self.get_byte_mut(3, reg, 0) = returned;
+            *self.get_byte_mut(&reg_addr) = returned;
         } else {
-            let self_val = *self.get_byte(mode, rm, offset);
-            let other_val = *self.get_byte(3, reg, 0);
+            let self_val = *self.get_byte(&rm_addr);
+            let other_val = *self.get_byte(&reg_addr);
             let returned = operator(self, self_val, other_val);
-            *self.get_byte_mut(mode, rm, offset) = returned;
+            *self.get_byte_mut(&rm_addr) = returned;
         }
     }
     fn reg_to_rm<B, W>(&mut self, dw: u8, byte_op: B, word_op: W)
@@ -201,24 +160,16 @@ impl CPU {
         }
     }
     fn rm_word<F>(&mut self, operator: F) where F: Fn(&mut CPU, u16, u8) -> u16 {
-        let op = self.next_code();
-        let mode = op >> 6;
-        let center = (op >> 3) & 7;
-        let rm = op & 7;
-        let offset = self.fetch_offset(mode, rm);
-        let self_val = self.read_word(mode, rm, offset);
+        let (rm_addr, center) = parse_rm(self);
+        let self_val = self.read_word(&rm_addr);
         let returned = operator(self, self_val, center);
-        self.write_word(mode, rm, offset, returned);
+        self.write_word(&rm_addr, returned);
     }
     fn rm_byte<F>(&mut self, operator: F) where F: Fn(&mut CPU, u8, u8) -> u8 {
-        let op = self.next_code();
-        let mode = op >> 6;
-        let center = (op >> 3) & 7;
-        let rm = op & 7;
-        let offset = self.fetch_offset(mode, rm);
-        let self_val = *self.get_byte(mode, rm, offset);
+        let (rm_addr, center) = parse_rm(self);
+        let self_val = *self.get_byte(&rm_addr);
         let returned = operator(self, self_val, center);
-        *self.get_byte_mut(mode, rm, offset) = returned;
+        *self.get_byte_mut(&rm_addr) = returned;
     }
     fn rm<B, W>(&mut self, w: bool, byte_op: B, word_op: W)
         where B: Fn(&mut CPU, u8, u8) -> u8, W: Fn(&mut CPU, u16, u8) -> u16 {
@@ -272,11 +223,11 @@ impl CPU {
                 if w & 1 == 0 {
                     // Byte
                     let data = self.next_code();
-                    *self.get_byte_mut(3, reg, 0) = data;
+                    *self.get_byte_mut(&parse_reg(reg)) = data;
                 } else {
                     // Word
                     let data = self.next_code_word();
-                    self.write_word(3, reg, 0, data);
+                    self.write_word(&parse_reg(reg), data);
                 }
             },
             0xA0 ... 0xA1 => {
@@ -313,17 +264,13 @@ impl CPU {
             0x8E | 0x8C => {
                 // Register / memory to segment register
                 let d = op & 2 != 0;
-                op = self.next_code();
-                let mode = op >> 6;
-                let sr = (op >> 3) & 4;
-                let rm = op & 7;
-                let offset = self.fetch_offset(mode, rm);
+                let (rm_addr, sr) = parse_rm(self);
                 if d {
-                    let value = self.read_word(mode, rm, offset);
+                    let value = self.read_word(&rm_addr);
                     self.state.segments[sr as usize] = value;
                 } else {
                     let value = self.state.segments[sr as usize];
-                    self.write_word(mode, rm, offset, value);
+                    self.write_word(&rm_addr, value);
                 }
             },
             // PUSH instruction
