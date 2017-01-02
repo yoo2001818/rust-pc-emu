@@ -1,15 +1,17 @@
 use std::mem;
 use std::fmt;
 use i8086::address::{RegisterOrMemory, parse_reg, parse_rm};
+use i8086::memory::Memory;
 use i8086::state::State;
 use i8086::constants;
 
 pub struct CPU {
     // Allocate 1MB for testing
-    pub ram: [u8; 1048576],
+    pub memory: Memory,
     pub state: State
 }
 
+#[allow(dead_code)]
 impl CPU {
     // As the code is fetched from the RAM itself, it's okay to fetch more than 1 byte
     // from single function
@@ -32,61 +34,23 @@ impl CPU {
     }
     /// Increment IP and return current instruction
     pub fn next_code(&mut self) -> u8 {
-        let output = self.ram[self.get_address_ip()];
+        let output = *self.memory.get_byte(self.get_address_ip());
         self.state.ip += 1;
         output
     }
     /// Increment IP and return current instruction word
     pub fn next_code_word(&mut self) -> u16 {
-        let output = self.read_word_memory(self.get_address_ip());
+        let output = self.memory.read_word(self.get_address_ip());
         self.state.ip += 2;
         output
-    }
-    /// Wraps the address to 0xFFFFF.
-    fn wrap_address(address: usize) -> usize {
-        address % 0xFFFFF
-    }
-    /// Reads the memory as word.
-    fn read_word_memory(&self, address: usize) -> u16 {
-        if address >= 0xFFFFF {
-            // TODO Disable this if A20 line is off?
-            unsafe {
-                u16::from_le(mem::transmute::<[u8; 2], u16>([
-                    self.ram[CPU::wrap_address(address)],
-                    self.ram[CPU::wrap_address(address + 1)]
-                ]))
-            }
-        } else {
-            unsafe {
-                let ptr = (&self.ram[address] as *const u8) as *const u16;
-                u16::from_le(*ptr)
-            }
-        }
-    }
-    /// Writes the memory as word.
-    fn write_word_memory(&mut self, address: usize, value: u16) {
-        let value_le = value.to_le();
-        if address >= 0xFFFFF {
-            // TODO Disable this if A20 line is off?
-            unsafe {
-                let value_arr = mem::transmute::<u16, [u8; 2]>(value_le);
-                self.ram[CPU::wrap_address(address)] = value_arr[0];
-                self.ram[CPU::wrap_address(address + 1)] = value_arr[1];
-            }
-        } else {
-            // This feels so scary
-            unsafe {
-                let ptr = (&mut self.ram[address] as *mut u8) as *mut u16;
-                *ptr = value_le;
-            }
-        }
     }
     /// Reads word from RegisterOrMemory.
     fn read_word(&self, address: &RegisterOrMemory) -> u16 {
         match address {
             &RegisterOrMemory::Register(addr) => self.state.registers[addr as usize],
             &RegisterOrMemory::Memory(addr) => {
-                self.read_word_memory(self.get_address(constants::DS, addr as usize))
+                let address = self.get_address(constants::DS, addr as usize);
+                self.memory.read_word(address)
             },
         }
     }
@@ -96,7 +60,7 @@ impl CPU {
             &RegisterOrMemory::Register(addr) => self.state.registers[addr as usize] = value,
             &RegisterOrMemory::Memory(addr) => {
                 let address = self.get_address(constants::DS, addr as usize);
-                self.write_word_memory(address, value)
+                self.memory.write_word(address, value)
             },
         }
     }
@@ -105,7 +69,8 @@ impl CPU {
         match address {
             &RegisterOrMemory::Register(addr) => self.state.get_register_byte(addr),
             &RegisterOrMemory::Memory(addr) => {
-                &self.ram[self.get_address(constants::DS, addr as usize)]
+                let address = self.get_address(constants::DS, addr as usize);
+                self.memory.get_byte(address)
             },
         }
     }
@@ -114,7 +79,8 @@ impl CPU {
         match address {
             &RegisterOrMemory::Register(addr) => self.state.get_register_byte_mut(addr),
             &RegisterOrMemory::Memory(addr) => {
-                &mut self.ram[self.get_address(constants::DS, addr as usize)]
+                let address = self.get_address(constants::DS, addr as usize);
+                self.memory.get_byte_mut(address)
             },
         }
     }
@@ -203,7 +169,7 @@ impl CPU {
     }
     /// Executes single instruction of the CPU.
     fn execute(&mut self) {
-        let mut op = self.next_code();
+        let op = self.next_code();
         match op {
             // MOV instruction
             0x88 ... 0x8B => {
@@ -239,10 +205,10 @@ impl CPU {
                 };
                 if w & 1 == 0 {
                     // Byte
-                    *self.state.get_register_byte_mut(constants::AL) = self.ram[addr];
+                    *self.state.get_register_byte_mut(constants::AL) = *self.memory.get_byte(addr);
                 } else {
                     // Word
-                    self.state.registers[constants::AX] = self.read_word_memory(addr);
+                    self.state.registers[constants::AX] = self.memory.read_word(addr);
                 }
             },
             0xA2 ... 0xA3 => {
@@ -254,11 +220,11 @@ impl CPU {
                 };
                 if w & 1 == 0 {
                     // Byte
-                    self.ram[addr] = *self.state.get_register_byte(constants::AL);
+                    *self.memory.get_byte_mut(addr) = *self.state.get_register_byte(constants::AL);
                 } else {
                     // Word
                     let value = self.state.registers[constants::AX];
-                    self.write_word_memory(addr, value);
+                    self.memory.write_word(addr, value);
                 }
             },
             0x8E | 0x8C => {
@@ -280,7 +246,7 @@ impl CPU {
                     assert!(center == 6);
                     cpu.state.registers[constants::SP] -= 2;
                     let address = cpu.get_address_register(constants::SS, constants::SP);
-                    cpu.write_word_memory(address, val);
+                    cpu.memory.write_word(address, val);
                     val
                 });
             },
@@ -289,14 +255,14 @@ impl CPU {
                 let val = self.state.registers[(op & 0x7) as usize];
                 self.state.registers[constants::SP] -= 2;
                 let address = self.get_address_register(constants::SS, constants::SP);
-                self.write_word_memory(address, val);
+                self.memory.write_word(address, val);
             },
             0x06 | 0x0E | 0x16 | 0x1E => {
                 // Store segment register
                 let val = self.state.segments[((op >> 3) & 0x3) as usize];
                 self.state.registers[constants::SP] -= 2;
                 let address = self.get_address_register(constants::SS, constants::SP);
-                self.write_word_memory(address, val);
+                self.memory.write_word(address, val);
             },
             // POP instruction
             0x8F => {
@@ -304,7 +270,7 @@ impl CPU {
                 self.rm_word(|cpu, val, center| {
                     assert!(center == 0);
                     let address = cpu.get_address_register(constants::SS, constants::SP);
-                    let result = cpu.read_word_memory(address);
+                    let result = cpu.memory.read_word(address);
                     cpu.state.registers[constants::SP] += 2;
                     result
                 });
@@ -312,14 +278,14 @@ impl CPU {
             0x58 ... 0x5F => {
                 // Pop register
                 let address = self.get_address_register(constants::SS, constants::SP);
-                let result = self.read_word_memory(address);
+                let result = self.memory.read_word(address);
                 self.state.registers[(op & 0x7) as usize] = result;
                 self.state.registers[constants::SP] += 2;
             },
             0x07 | 0x0F | 0x17 | 0x1F => {
                 // Pop segment register
                 let address = self.get_address_register(constants::SS, constants::SP);
-                let result = self.read_word_memory(address);
+                let result = self.memory.read_word(address);
                 self.state.segments[((op >> 3) & 0x3) as usize] = result;
                 self.state.registers[constants::SP] += 2;
             },

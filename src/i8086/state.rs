@@ -2,6 +2,7 @@ use std::mem;
 use std::fmt;
 use i8086::constants;
 
+#[allow(dead_code)]
 pub struct State {
     pub registers: [u16; 8],
     pub segments: [u16; 4],
@@ -11,6 +12,7 @@ pub struct State {
     pub flags: u16
 }
 
+#[allow(dead_code)]
 impl State {
     pub fn new() -> State {
         State {

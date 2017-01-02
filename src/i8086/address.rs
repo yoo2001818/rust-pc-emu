@@ -6,10 +6,12 @@ pub enum RegisterOrMemory {
     Memory(u16)
 }
 
+#[allow(dead_code)]
 pub fn parse_reg(reg: u8) -> RegisterOrMemory {
     RegisterOrMemory::Register(reg)
 }
 
+#[allow(dead_code)]
 pub fn parse_rm(cpu: &mut CPU) -> (RegisterOrMemory, u8) {
     let op = cpu.next_code();
     let mode = op >> 6;
@@ -26,10 +28,14 @@ pub fn parse_rm(cpu: &mut CPU) -> (RegisterOrMemory, u8) {
             _ => panic!("Unknown Mode {}", mode)
         };
         let address = (match rm {
-            0 => cpu.state.registers[constants::BX] + cpu.state.registers[constants::SI],
-            1 => cpu.state.registers[constants::BX] + cpu.state.registers[constants::DI],
-            2 => cpu.state.registers[constants::BP] + cpu.state.registers[constants::SI],
-            3 => cpu.state.registers[constants::BP] + cpu.state.registers[constants::DI],
+            0 => cpu.state.registers[constants::BX].wrapping_add(
+                cpu.state.registers[constants::SI]),
+            1 => cpu.state.registers[constants::BX].wrapping_add(
+                cpu.state.registers[constants::DI]),
+            2 => cpu.state.registers[constants::BP].wrapping_add(
+                cpu.state.registers[constants::SI]),
+            3 => cpu.state.registers[constants::BP].wrapping_add(
+                cpu.state.registers[constants::DI]),
             4 => cpu.state.registers[constants::SI],
             5 => cpu.state.registers[constants::DI],
             6 if mode == 0 => 0,
